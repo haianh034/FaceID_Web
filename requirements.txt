@@ -1,0 +1,11 @@
+streamlit
+streamlit_option_menu
+opencv-python-headless
+insightface
+onnxruntime
+pandas
+fastapi
+uvicorn
+python-multipart
+scikit-learn
+numpy

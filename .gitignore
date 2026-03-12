@@ -1,0 +1,16 @@
+dataset/
+database/attendance.db
+database/*.db
+database/*.sqlite3
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+env/
+.env
+.venv
+.streamlit/secrets.toml
+.insightface/
+Thumbs.db
+ehthumbs.db
+Desktop.ini

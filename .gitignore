@@ -11,6 +11,8 @@ env/
 .venv
 .streamlit/secrets.toml
 .insightface/
+models/
+*.onnx
 Thumbs.db
 ehthumbs.db
 Desktop.ini

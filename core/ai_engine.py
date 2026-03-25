@@ -135,34 +135,44 @@ class FaceAttendanceSystem:
         conn = sqlite3.connect(db_path)
         cursor = conn.cursor()
         
-        # --- Query dùng JOIN bảng enrollments ---
+        # --- Query dùng JOIN bảng enrollments (Lấy thêm STT) ---
         if class_id:
-            # Nếu chọn lớp cụ thể -> Chỉ lấy SV trong lớp đó qua bảng enrollments
             query = """
-                SELECT s.id, s.name, s.image_path 
+                SELECT s.id, s.name, s.image_path, e.stt
                 FROM students s
                 JOIN enrollments e ON s.id = e.student_id
                 WHERE e.class_id = ?
             """
             cursor.execute(query, (class_id,))
         else:
-            # Nếu không chọn lớp -> Lấy tất cả
-            query = "SELECT id, name, image_path FROM students"
+            query = "SELECT id, name, image_path, 0 as stt FROM students"
             cursor.execute(query)
             
         students = cursor.fetchall()
         conn.close()
 
-        for s_id, s_name, img_path in students:
-            # Đọc ảnh từ đường dẫn
-            img = self.read_image_robust(img_path)
+        for s_id, s_name, img_path, stt in students:
+            actual_path = img_path
+            
+            # --- CƠ CHẾ AUTO-FALLBACK TỰ ĐỘNG SỬA ĐƯỜNG DẪN ẢNH BỊ LỖI ---
+            # Nếu trong DB ghi rỗng hoặc file không tồn tại (vd: do file setup tạo)
+            if not actual_path or not os.path.exists(str(actual_path)):
+                # Tự động đoán tên file ảnh theo MSSV
+                fallback_path = f"dataset/gallery/{s_id}.jpg"
+                if os.path.exists(fallback_path):
+                    actual_path = fallback_path # Vá thành công
+                else:
+                    continue # Nếu vẫn không có file thật trên máy thì đành bỏ qua
+            
+            # Đọc ảnh từ đường dẫn đã được vá
+            img = self.read_image_robust(actual_path)
             if img is None: continue
             
-            # Tính embedding
             emb = self.get_single_embedding(img)
             if emb is not None:
                 self.gallery_embeddings.append(emb)
-                self.gallery_info.append({"id": s_id, "name": s_name})
+                stt_val = stt if stt is not None else "?"
+                self.gallery_info.append({"id": s_id, "name": s_name, "stt": stt_val})
         
         if self.gallery_embeddings:
             self.gallery_embeddings = np.array(self.gallery_embeddings)
@@ -209,3 +219,36 @@ class FaceAttendanceSystem:
             })
         
         return attendance_list, img
+    
+    def compare_and_clean_unknowns(self, target_image_path, unknown_list, threshold=0.5):
+        """
+        Lấy 1 ảnh làm chuẩn, so sánh với danh sách các ảnh người lạ.
+        Trả về danh sách ID của những ảnh giống khuôn mặt chuẩn.
+        """
+        # 1. Trích xuất embedding của ảnh chuẩn
+        target_img = self.read_image_robust(target_image_path)
+        if target_img is None: return []
+        
+        target_emb = self.get_single_embedding(target_img)
+        if target_emb is None: return []
+
+        similar_ids = []
+        
+        # 2. Quét qua danh sách các ảnh người lạ
+        for u_id, u_path in unknown_list:
+            if not os.path.exists(u_path): continue
+            
+            u_img = self.read_image_robust(u_path)
+            if u_img is None: continue
+            
+            u_emb = self.get_single_embedding(u_img)
+            if u_emb is None: continue
+            
+            # 3. Tính độ giống nhau
+            sim = cosine_similarity([target_emb], [u_emb])[0][0]
+            
+            # 4. Nếu giống > threshold -> Đưa vào danh sách cần xóa
+            if sim >= threshold:
+                similar_ids.append(u_id)
+                
+        return similar_ids

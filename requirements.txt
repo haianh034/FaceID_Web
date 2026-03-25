@@ -9,3 +9,4 @@ uvicorn
 python-multipart
 scikit-learn
 numpy
+openpyxl

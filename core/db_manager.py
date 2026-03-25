@@ -11,17 +11,17 @@ def init_db():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     
-    # 1. Bảng Sinh viên (Chứa thông tin gốc của SV, không xóa dù có rời lớp, để giữ lịch sử điểm danh)
+    # 1. Bảng Sinh viên (Đã thêm email TEXT)
     c.execute('''CREATE TABLE IF NOT EXISTS students
-                 (id TEXT PRIMARY KEY, name TEXT, image_path TEXT, created_at TEXT)''')
+                 (id TEXT PRIMARY KEY, name TEXT, image_path TEXT, created_at TEXT, email TEXT)''')
 
-    # 2. Bảng Lớp học (Chứa thông tin lớp, nếu xóa lớp thì xóa luôn dữ liệu liên quan trong các bảng khác)
+    # 2. Bảng Lớp học
     c.execute('''CREATE TABLE IF NOT EXISTS classes
                  (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, created_at TEXT)''')
 
-    # 3. Bảng Ghi danh (Liên kết SV và Lớp)
+    # 3. Bảng Ghi danh (Đã thêm stt INTEGER)
     c.execute('''CREATE TABLE IF NOT EXISTS enrollments
-                 (student_id TEXT, class_id INTEGER, joined_at TEXT,
+                 (student_id TEXT, class_id INTEGER, joined_at TEXT, stt INTEGER,
                   FOREIGN KEY(student_id) REFERENCES students(id),
                   FOREIGN KEY(class_id) REFERENCES classes(id),
                   PRIMARY KEY (student_id, class_id))''')
@@ -31,15 +31,26 @@ def init_db():
                  (id INTEGER PRIMARY KEY AUTOINCREMENT, 
                   student_id TEXT, class_id INTEGER, 
                   checkin_time TEXT, image_evidence TEXT)''')
-    
-    # 5. Bảng Logs Người Lạ 
+                  
+    # 5. Bảng Logs Người Lạ (Giữ nguyên)
     c.execute('''CREATE TABLE IF NOT EXISTS unknown_logs
                  (id INTEGER PRIMARY KEY AUTOINCREMENT, 
                   class_id INTEGER, 
                   session_date TEXT, 
                   image_path TEXT, 
                   created_at TEXT)''')
-    
+
+    # --- NÂNG CẤP DATABASE CŨ (KHÔNG LÀM MẤT DỮ LIỆU) ---
+    try:
+        c.execute("ALTER TABLE students ADD COLUMN email TEXT")
+    except:
+        pass # Bỏ qua nếu cột email đã tồn tại
+        
+    try:
+        c.execute("ALTER TABLE enrollments ADD COLUMN stt INTEGER")
+    except:
+        pass # Bỏ qua nếu cột stt đã tồn tại
+
     conn.commit()
     conn.close()
 
@@ -152,6 +163,20 @@ def remove_student_from_class(student_id, class_id):
     c.execute("DELETE FROM enrollments WHERE student_id=? AND class_id=?", (student_id, class_id))
     conn.commit()
     conn.close()
+    
+def get_students_in_class(class_id):
+    """Lấy danh sách sinh viên đầy đủ STT và Email để hiển thị lên bảng"""
+    conn = sqlite3.connect(DB_PATH)
+    query = """
+        SELECT e.stt as "STT", s.id as "Mã SV", s.name as "Họ Tên", s.email as "Email", s.image_path as "Đường dẫn Ảnh", e.joined_at as "Ngày thêm"
+        FROM students s
+        JOIN enrollments e ON s.id = e.student_id
+        WHERE e.class_id = ?
+        ORDER BY e.stt ASC, s.id ASC
+    """
+    df = pd.read_sql_query(query, conn, params=(class_id,))
+    conn.close()
+    return df
 
 # --- KHỐI THỐNG KÊ  ---
 def get_class_stats_detailed(class_id):
@@ -417,37 +442,37 @@ def delete_students_bulk(student_id_list, class_id):
         conn.close()
         
     # --- Hàm thêm sinh viên (Cho phép ảnh rỗng) ---
-def add_student_to_class(student_id, name, image_path, class_id):
+def add_student_to_class(student_id, name, image_path, class_id, email=None, stt=None):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     try:
-        # 1. Thêm/Update vào bảng students
-        # Nếu image_path là chuỗi rỗng "", ta vẫn lưu bình thường
         c.execute("SELECT * FROM students WHERE id=?", (student_id,))
         exist = c.fetchone()
         
         if exist:
-            # Nếu đã tồn tại -> Chỉ update tên và ảnh (nếu có ảnh mới)
             if image_path: 
-                c.execute("UPDATE students SET name=?, image_path=? WHERE id=?", (name, image_path, student_id))
+                c.execute("UPDATE students SET name=?, image_path=?, email=? WHERE id=?", (name, image_path, email, student_id))
             else:
-                # Nếu không có ảnh mới, giữ nguyên ảnh cũ hoặc update tên thôi
-                c.execute("UPDATE students SET name=? WHERE id=?", (name, student_id))
+                c.execute("UPDATE students SET name=?, email=? WHERE id=?", (name, email, student_id))
         else:
-            # Nếu chưa tồn tại -> Tạo mới (image_path có thể là "")
             if image_path is None: image_path = ""
             created_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            c.execute("INSERT INTO students (id, name, image_path, created_at) VALUES (?, ?, ?, ?)", 
-                      (student_id, name, image_path, created_at))
+            c.execute("INSERT INTO students (id, name, image_path, created_at, email) VALUES (?, ?, ?, ?, ?)", 
+                      (student_id, name, image_path, created_at, email))
 
-        # 2. Thêm vào bảng enrollments (Ghi danh vào lớp)
-        # Dùng INSERT OR IGNORE để tránh lỗi nếu đã học lớp này rồi
         joined_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        c.execute("INSERT OR IGNORE INTO enrollments (student_id, class_id, joined_at) VALUES (?, ?, ?)", 
-                  (student_id, class_id, joined_at))
+        
+        if class_id: # Thêm điều kiện an toàn
+            c.execute("SELECT * FROM enrollments WHERE student_id=? AND class_id=?", (student_id, class_id))
+            if c.fetchone():
+                if stt is not None:
+                    c.execute("UPDATE enrollments SET stt=? WHERE student_id=? AND class_id=?", (stt, student_id, class_id))
+            else:
+                c.execute("INSERT INTO enrollments (student_id, class_id, joined_at, stt) VALUES (?, ?, ?, ?)", 
+                          (student_id, class_id, joined_at, stt))
         
         conn.commit()
-        return True, f"Đã lưu sinh viên {name} ({student_id}) thành công!"
+        return True, f"Đã lưu thông tin {name} ({student_id}) thành công!"
     except Exception as e:
         return False, f"Lỗi DB: {str(e)}"
     finally:
@@ -748,6 +773,54 @@ def log_attendance_db(student_id, class_id, image_evidence):
         return False
     finally:
         conn.close()
+        
+def get_student_id_by_email(email):
+    """Tìm MSSV dựa trên Email"""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT id FROM students WHERE email = ?", (email,))
+    row = c.fetchone()
+    conn.close()
+    return row[0] if row else None
+
+def get_student_attendance_history(student_id, class_id):
+    """
+    Lấy lịch sử điểm danh chi tiết của 1 sinh viên trong tất cả các buổi học của lớp.
+    Trả về DataFrame: Ngày | Trạng thái
+    """
+    conn = sqlite3.connect(DB_PATH)
+    
+    # 1. Lấy danh sách TẤT CẢ các ngày đã điểm danh của lớp
+    query_dates = """
+        SELECT DISTINCT day FROM (
+            SELECT date(checkin_time) as day FROM attendance_logs WHERE class_id = ?
+            UNION
+            SELECT session_date as day FROM unknown_logs WHERE class_id = ?
+        ) ORDER BY day DESC
+    """
+    df_dates = pd.read_sql_query(query_dates, conn, params=(class_id, class_id))
+    
+    # 2. Lấy log của riêng sinh viên này
+    query_logs = """
+        SELECT date(checkin_time) as day, image_evidence 
+        FROM attendance_logs 
+        WHERE student_id = ? AND class_id = ?
+    """
+    df_logs = pd.read_sql_query(query_logs, conn, params=(student_id, class_id))
+    conn.close()
+    
+    if df_dates.empty:
+        return pd.DataFrame(columns=['Ngày', 'Trạng thái'])
+        
+    # Xóa trùng lặp (trường hợp điểm danh 2 lần 1 ngày)
+    df_logs = df_logs.drop_duplicates(subset=['day'])
+    
+    # 3. Gộp bảng để biết ngày nào có đi, ngày nào vắng
+    df_result = pd.merge(df_dates, df_logs, on='day', how='left')
+    df_result['Trạng thái'] = df_result['image_evidence'].apply(lambda x: 'Có mặt' if pd.notnull(x) else 'Vắng')
+    df_result.rename(columns={'day': 'Ngày'}, inplace=True)
+    
+    return df_result[['Ngày', 'Trạng thái']]
 
 # Initialize DB lần đầu
 init_db()

@@ -1,4 +1,4 @@
-from time import time
+import time
 import streamlit as st
 import pandas as pd
 import sqlite3
@@ -108,35 +108,54 @@ if st.button("Quay lại danh sách lớp"):
     st.rerun()
 
 st.header(f"Lớp: {selected_cname}")
-tab1, tab2, tab3 = st.tabs(["THỐNG KÊ", "QUẢN LÝ SINH VIÊN", "BỔ SUNG ẢNH"])
+tab1, tab2, tab3 = st.tabs(["DANH SÁCH & THỐNG KÊ", "QUẢN LÝ SINH VIÊN", "BỔ SUNG ẢNH"])
 
-# === TAB 1: THỐNG KÊ ===
+# === TAB 1: DANH SÁCH & THỐNG KÊ ===
 with tab1:
-    df_sv = db.get_class_stats_detailed(selected_cid)
-    if df_sv.empty:
+    df_students = db.get_students_in_class(selected_cid)
+    
+    if df_students.empty:
         st.warning("Lớp chưa có sinh viên.")
     else:
-        search_stats = st.text_input("Tìm sinh viên:", key="search_stats")
-        if search_stats:
-            df_sv = df_sv[df_sv['name'].str.contains(search_stats, case=False) | df_sv['id'].str.contains(search_stats, case=False)]
+        df_stats = db.get_class_stats_detailed(selected_cid)
+        
+        # Merge để ghép cột vắng mặt/có mặt vào bảng chính
+        if not df_stats.empty:
+            df_merged = pd.merge(df_students, df_stats[['id', 'present_count', 'absent_count']], left_on='Mã SV', right_on='id', how='left')
+        else:
+            df_merged = df_students.copy()
+            df_merged['present_count'] = 0
+            df_merged['absent_count'] = 0
 
-        df_sv = df_sv.reset_index(drop=True)
-        df_sv['STT'] = (df_sv.index + 1).astype(str)
-        df_sv['present_count'] = df_sv['present_count'].astype(str)
-        df_sv['absent_count'] = df_sv['absent_count'].astype(str)
+        # Thanh tìm kiếm
+        search_stats = st.text_input("🔍 Tìm sinh viên (Nhập Tên, Mã SV hoặc Email):", key="search_stats")
+        if search_stats:
+            df_merged = df_merged[df_merged['Họ Tên'].str.contains(search_stats, case=False) | 
+                                  df_merged['Mã SV'].str.contains(search_stats, case=False) | 
+                                  df_merged['Email'].str.fillna("").str.contains(search_stats, case=False)]
+
+        # Định dạng lại dữ liệu hiển thị
+        df_merged['Email'] = df_merged['Email'].fillna("—")
+        df_merged['present_count'] = df_merged['present_count'].fillna(0).astype(int).astype(str)
+        df_merged['absent_count'] = df_merged['absent_count'].fillna(0).astype(int).astype(str)
+        
+        if 'STT' in df_merged.columns and df_merged['STT'].notna().any():
+            df_merged['STT_HienThi'] = df_merged['STT'].fillna(0).astype(int).astype(str).replace("0", "—")
+        else:
+            df_merged['STT_HienThi'] = (df_merged.reset_index().index + 1).astype(str)
 
         def highlight_warning(row):
             if int(row['absent_count']) >= 2:
                 return ['background-color: #ffeba1'] * len(row)
             return [''] * len(row)
 
-        # [CẬP NHẬT] Đổi tiêu đề cột tại đây
         st.dataframe(
-            df_sv[['STT', 'id', 'name', 'present_count', 'absent_count']].style.apply(highlight_warning, axis=1),
+            df_merged[['STT_HienThi', 'Mã SV', 'Họ Tên', 'Email', 'present_count', 'absent_count']].style.apply(highlight_warning, axis=1),
             column_config={
-                "STT": st.column_config.TextColumn("STT", width="small"),
-                "id": st.column_config.TextColumn("Mã số sinh viên"),  # <--- ĐỔI TÊN
-                "name": st.column_config.TextColumn("Họ và tên"),      # <--- ĐỔI TÊN
+                "STT_HienThi": st.column_config.TextColumn("STT", width="small"),
+                "Mã SV": st.column_config.TextColumn("Mã SV"),
+                "Họ Tên": st.column_config.TextColumn("Họ và Tên"),
+                "Email": st.column_config.TextColumn("Email"),
                 "present_count": st.column_config.TextColumn("Có mặt"),
                 "absent_count": st.column_config.TextColumn("Vắng (Buổi)")
             },
@@ -146,28 +165,18 @@ with tab1:
 
 # === TAB 2: QUẢN LÝ SINH VIÊN ===
 with tab2:
-    # Menu chức năng
     mode = st.radio("Chức năng:", ["Thêm/Sửa Sinh viên", "Import Excel", "Xóa Sinh viên"], horizontal=True)
     
     # CHỨC NĂNG 1: THÊM / SỬA SINH VIÊN
     if mode == "Thêm/Sửa Sinh viên":
-        st.info("Nhập MSSV hiện tại để tìm kiếm. Sau đó có thể sửa Tên, Ảnh hoặc đổi sang MSSV mới.")
+        st.info("💡 Bạn có thể nhập **MSSV** hoặc **Email** để cập nhật thông tin. (Nếu thêm mới hoàn toàn, bắt buộc phải có MSSV).")
         
         c1, c2 = st.columns(2)
-        current_id = c1.text_input("Nhập MSSV hiện tại:", placeholder="Ví dụ: SV001").strip()
+        stt_input = c1.number_input("Số Thứ Tự (Tùy chọn)", min_value=1, step=1, value=None)
+        current_id = c1.text_input("Mã Sinh Viên (MSSV):", placeholder="Ví dụ: SV001").strip()
         
-        current_name_val = ""
-        if current_id:
-            conn = sqlite3.connect(db.DB_PATH)
-            cur = conn.cursor()
-            cur.execute("SELECT name FROM students WHERE id=?", (current_id,))
-            res = cur.fetchone()
-            conn.close()
-            if res: current_name_val = res[0]
-            else: 
-                if len(current_id) > 0: st.caption("✨ Đây là sinh viên mới.")
-
-        inp_name = c2.text_input("Họ và tên:", value=current_name_val)
+        email_input = c2.text_input("Email:", placeholder="Ví dụ: nva@gmail.com").strip()
+        inp_name = c2.text_input("Họ và tên:")
 
         change_id_mode = st.checkbox("Tôi muốn đổi Mã số sinh viên (Sửa ID)")
         new_id_input = None
@@ -175,7 +184,7 @@ with tab2:
             new_id_input = st.text_input("Nhập MSSV Mới:", placeholder="Nhập mã mới...").strip()
             if new_id_input: st.warning(f"Đang đổi mã từ **{current_id}** sang **{new_id_input}**.")
 
-        st.write("Ảnh đại diện:")
+        st.write("Ảnh đại diện (Tùy chọn):")
         img_opt = st.radio("Nguồn ảnh:", ["Upload", "Chụp ảnh"], horizontal=True)
         img_buffer = None
         
@@ -186,56 +195,72 @@ with tab2:
             cam = st.camera_input("Chụp ảnh")
             if cam: img_buffer = cam.read()
             
-        if st.button("Lưu thông tin", type="primary"):
-            if not current_id or not inp_name:
-                st.error("Vui lòng nhập Mã SV và Tên.")
+        if st.button("💾 Lưu thông tin", type="primary"):
+            target_id = current_id
+            
+            if not target_id and not email_input:
+                st.error("❌ Vui lòng nhập ít nhất Mã SV hoặc Email!")
             else:
-                save_path = None
-                if img_buffer:
-                    target_id = new_id_input if (change_id_mode and new_id_input) else current_id
-                    save_path = f"dataset/gallery/{target_id}.jpg"
-                    # Tạo thư mục nếu chưa có
-                    os.makedirs("dataset/gallery", exist_ok=True)
-                    with open(save_path, "wb") as f: f.write(img_buffer)
+                if not target_id and email_input:
+                    found_id = db.get_student_id_by_email(email_input)
+                    if found_id:
+                        target_id = found_id
+                        st.success(f"🔍 Đã tự động tìm thấy MSSV: {target_id} qua Email.")
+                    else:
+                        st.error("❌ Không tìm thấy sinh viên nào có Email này. Vui lòng nhập Mã SV để tạo mới.")
+                        target_id = None
+                        
+                if target_id and not inp_name:
+                    st.error("❌ Vui lòng nhập Họ và Tên.")
+                elif target_id:
+                    save_path = None
+                    if img_buffer:
+                        final_id = new_id_input if (change_id_mode and new_id_input) else target_id
+                        save_path = f"dataset/gallery/{final_id}.jpg"
+                        os.makedirs("dataset/gallery", exist_ok=True)
+                        with open(save_path, "wb") as f: f.write(img_buffer)
 
-                if change_id_mode and new_id_input and new_id_input != current_id:
-                    succ, msg = db.update_student_id(current_id, new_id_input, inp_name, save_path)
-                else:
-                    succ, msg = db.add_student_to_class(current_id, inp_name, save_path if save_path else None, selected_cid)
-                
-                if succ:
-                    st.success(msg)
-                    if change_id_mode: st.balloons()
-                else:
-                    st.error(msg)
+                    if change_id_mode and new_id_input and new_id_input != target_id:
+                        succ, msg = db.update_student_id(target_id, new_id_input, inp_name, save_path)
+                        if succ:
+                            db.add_student_to_class(new_id_input, inp_name, save_path, selected_cid, email=email_input if email_input else None, stt=stt_input)
+                    else:
+                        succ, msg = db.add_student_to_class(target_id, inp_name, save_path, selected_cid, email=email_input if email_input else None, stt=stt_input)
+                    
+                    if succ:
+                        st.success("✅ Đã cập nhật sinh viên thành công!")
+                        if change_id_mode: st.balloons()
+                        time.sleep(1)
+                        st.rerun()
+                    else:
+                        st.error(msg)
 
+    # ---------------------------------------------------------
     # CHỨC NĂNG 2: IMPORT EXCEL 
+    # ---------------------------------------------------------
     elif mode == "Import Excel":
-        st.markdown("### Thêm danh sách từ Excel")
-        st.info("File Excel cần có 2 cột tiêu đề: **id** (Mã SV) và **name** (Họ tên).")
+        st.markdown("### 📥 Thêm danh sách từ Excel")
+        st.info("💡 File Excel CẦN có 2 cột: **id** (Mã SV) và **name** (Họ tên). Các cột TÙY CHỌN: **stt** (Số thứ tự), **email**.")
 
         uploaded_file = st.file_uploader("Chọn file .xlsx hoặc .csv", type=['xlsx', 'csv'])
         
         if uploaded_file:
             try:
-                # Đọc file dựa vào đuôi mở rộng
                 if uploaded_file.name.endswith('.csv'):
                     df_input = pd.read_csv(uploaded_file)
                 else:
                     df_input = pd.read_excel(uploaded_file)
                 
-                # Chuẩn hóa tên cột về chữ thường để tránh lỗi (ID, Id -> id)
                 df_input.columns = [c.lower().strip() for c in df_input.columns]
                 
-                # Kiểm tra cột bắt buộc
                 if 'id' not in df_input.columns or 'name' not in df_input.columns:
-                    st.error("File thiếu cột 'id' hoặc 'name'. Vui lòng kiểm tra lại file Excel.")
-                    st.dataframe(df_input.head(2)) # Hiện thử cho user xem
+                    st.error("❌ File thiếu cột 'id' hoặc 'name'. Vui lòng kiểm tra lại file Excel.")
+                    st.dataframe(df_input.head(2)) 
                 else:
                     st.write("Xem trước dữ liệu:")
                     st.dataframe(df_input.head())
                     
-                    if st.button(f"Xác nhận Import {len(df_input)} sinh viên"):
+                    if st.button(f"🚀 Xác nhận Import {len(df_input)} sinh viên"):
                         count_success = 0
                         my_bar = st.progress(0)
                         
@@ -243,14 +268,15 @@ with tab2:
                             sid = str(row['id']).strip()
                             sname = str(row['name']).strip()
                             
-                            # Gọi hàm thêm vào lớp (Ảnh để None/Null)
-                            succ, _ = db.add_student_to_class(sid, sname, None, selected_cid)
+                            sst_val = int(row['stt']) if 'stt' in df_input.columns and not pd.isna(row['stt']) else None
+                            email_val = str(row['email']).strip() if 'email' in df_input.columns and not pd.isna(row['email']) else None
+                            
+                            succ, _ = db.add_student_to_class(sid, sname, None, selected_cid, email=email_val, stt=sst_val)
                             if succ: count_success += 1
                             
-                            # Cập nhật thanh tiến trình
                             my_bar.progress((i + 1) / len(df_input))
                         
-                        st.success(f"Đã thêm thành công {count_success}/{len(df_input)} sinh viên vào lớp!")
+                        st.success(f"✅ Đã thêm thành công {count_success}/{len(df_input)} sinh viên vào lớp!")
                         st.balloons()
             except Exception as e:
                 st.error(f"Lỗi khi đọc file: {e}")
@@ -258,16 +284,12 @@ with tab2:
     # CHỨC NĂNG 3: XÓA SINH VIÊN 
     elif mode == "Xóa Sinh viên":
         st.markdown("### Xóa sinh viên khỏi lớp")
-        
-        # Lấy danh sách SV hiện tại để chọn xóa
         df_sv = db.get_class_stats_detailed(selected_cid)
         
         if df_sv.empty:
             st.warning("Lớp này trống, không có gì để xóa.")
         else:
-            # Tạo danh sách lựa chọn dạng "Mã - Tên"
             student_opts = df_sv.apply(lambda x: f"{x['id']} - {x['name']}", axis=1).tolist()
-            
             selected_to_del = st.multiselect("Chọn các sinh viên cần xóa:", student_opts)
             
             if selected_to_del:
@@ -276,15 +298,13 @@ with tab2:
                 col_del_1, col_del_2 = st.columns([1, 4])
                 with col_del_1:
                     if st.button("XÁC NHẬN XÓA", type="primary"):
-                        # Tách lấy ID từ chuỗi lựa chọn
                         ids_to_del = [s.split(" - ")[0] for s in selected_to_del]
-                        
-                        # Gọi hàm xóa bulk từ db_manager
                         succ, msg = db.delete_students_bulk(ids_to_del, selected_cid)
                         
                         if succ:
                             st.success(msg)
-                            st.rerun() # Tải lại trang
+                            time.sleep(1)
+                            st.rerun() 
                         else:
                             st.error(msg)
 
@@ -324,6 +344,7 @@ with tab3:
                     res, msg = db.add_student_to_class(curr_sv['id'], curr_sv['name'], save_path, selected_cid)
                     if res: 
                         st.success(f"Đã cập nhật ảnh cho {curr_sv['name']}!")
+                        time.sleep(1)
                         st.rerun()
                     else: st.error(msg)
                 else:
